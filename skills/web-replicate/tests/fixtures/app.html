@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A tiny fixture app for web-replicate tests.">
+  <meta name="generator" content="FixtureKit 1.0">
+  <title>Fixture Dashboard</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; }
+    .cta { background: #2563eb; color: white; padding: .5rem 1rem; }
+  </style>
+</head>
+<body>
+  <header><nav><a href="/home">Home</a> <a href="/settings">Settings</a></nav></header>
+  <main>
+    <h1>Dashboard</h1>
+    <button id="load" class="cta">Load data</button>
+    <div id="result">idle</div>
+    <form action="/api/save" method="post">
+      <label for="title">Post Title</label>
+      <input id="title" name="title" type="text" placeholder="Title" required minlength="5" maxlength="80" autocomplete="off">
+      <label for="visibility">Visibility</label>
+      <select id="visibility" name="visibility">
+        <option>Public</option>
+        <option>Private</option>
+      </select>
+      <button type="submit">Save</button>
+    </form>
+    <!-- formless (React-style) labeled control the form scan must NOT miss -->
+    <section id="profile">
+      <label>Business Description</label>
+      <textarea name="bio" placeholder="Tell us about the business"></textarea>
+    </section>
+    <a href="https://example.com/ext" target="_blank">External</a>
+  </header>
+  <script>
+    // seed some client state the capture should observe
+    localStorage.setItem('fixture.session', 'abc123');
+    localStorage.setItem('fixture.theme', 'dark');
+    console.log('fixture booted');
+    document.getElementById('load').addEventListener('click', async () => {
+      document.getElementById('result').textContent = 'loading';
+      try {
+        const r = await fetch('/api/data', { headers: { 'Authorization': 'Bearer secrettoken' } });
+        document.getElementById('result').textContent = 'loaded ' + r.status;
+      } catch (e) {
+        document.getElementById('result').textContent = 'ok (offline)';
+      }
+    });
+  </script>
+</body>
+</html>

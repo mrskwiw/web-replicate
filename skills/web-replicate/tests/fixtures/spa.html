@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>SPA Fixture</title>
+  <!-- Vite-style production module bundle (hashed name under /assets/) -->
+  <script type="module" crossorigin src="/assets/index-a1b2c3d4.js"></script>
+  <link rel="stylesheet" href="/assets/index-e5f6a7b8.css">
+</head>
+<body>
+  <div id="root">
+    <div class="flex items-center gap-4 rounded-md bg-blue-500 px-4 py-2 text-sm">app</div>
+  </div>
+  <script>
+    // Simulate a PRODUCTION React app: no window.React, but the runtime attaches
+    // fiber markers to DOM nodes. We fake that own-enumerable property here.
+    document.getElementById('root').__reactContainer$test = {};
+    document.querySelector('#root > div').__reactFiber$test = {};
+    // Passive library globals the fingerprint should detect.
+    window.Stripe = function () {};
+    window.dataLayer = [];
+    window.Sentry = { captureException: function () {} };
+  </script>
+</body>
+</html>
