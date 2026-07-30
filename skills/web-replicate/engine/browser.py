@@ -13,6 +13,7 @@ agent's job (see ../SKILL.md).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, List, Optional
@@ -28,6 +29,7 @@ from .models import (
     AssetRef,
     ConsoleMessage,
     Cookie,
+    DesignTokens,
     FormField,
     FormInfo,
     InteractiveElement,
@@ -58,12 +60,25 @@ class CaptureController:
         redact: bool = True,
         max_inline_body: int = 8192,
         download_assets: bool = False,
+        action_timeout_ms: int = 6000,
+        shot_timeout_ms: int = 12000,
+        eval_budget_ms: int = 8000,
     ) -> None:
         self._out = Path(out_dir)
         self._engine = engine
         self._headless = headless
         self._viewport = {"width": viewport_width, "height": viewport_height}
         self._timeout = timeout_ms
+        # Default per-ACTION timeout (clicks/fills/wait_for/evaluate) — deliberately
+        # short so a missing selector fails fast (~6s) instead of stalling 20s per step.
+        # Navigation (``goto``) keeps the longer ``timeout_ms`` explicitly.
+        self._action_timeout_ms = action_timeout_ms
+        # Screenshot + per-evaluate HARD budgets. A page saturated by SSE/websocket or
+        # infinite scroll can make full-page screenshot / DOM serialization never
+        # return; these wall-clock caps guarantee a capture completes (degraded) rather
+        # than hanging the whole run (the /communities failure mode).
+        self._shot_timeout_ms = shot_timeout_ms
+        self._eval_budget_ms = eval_budget_ms
         # Bounded, best-effort post-load settle; never a hard networkidle wait.
         # Kept SHORT (web-qa's proven 3s default) on purpose: apps with constant
         # background traffic — Next.js route prefetching, polling, websockets, SSE,
@@ -103,7 +118,7 @@ class CaptureController:
             ctx_kwargs["storage_state"] = self._storage_state
         self._context = await self._browser.new_context(**ctx_kwargs)
         self._page = await self._context.new_page()
-        self._page.set_default_timeout(self._timeout)
+        self._page.set_default_timeout(self._action_timeout_ms)
         self._wire_listeners()
 
     async def save_session(self, path: str, user_agent: Optional[str] = None) -> str:
@@ -239,11 +254,26 @@ class CaptureController:
         target.write_bytes(data)
         return target.relative_to(self._out).as_posix()
 
-    async def screenshot(self, subdir: str, name: str) -> str:
+    async def screenshot(self, subdir: str, name: str) -> Optional[str]:
+        """Full-page screenshot, bounded. Full-page can hang on infinite-scroll /
+        live pages, so it's time-capped; on overrun it falls back to a viewport shot,
+        and if even that fails the capture proceeds without a screenshot (never a
+        blocker)."""
         target = self._out / subdir / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        await self._page.screenshot(path=str(target), full_page=True)
-        return target.relative_to(self._out).as_posix()
+        for full_page in (True, False):
+            try:
+                await asyncio.wait_for(
+                    self._page.screenshot(
+                        path=str(target), full_page=full_page,
+                        animations="disabled", timeout=self._shot_timeout_ms,
+                    ),
+                    self._shot_timeout_ms / 1000 + 2,
+                )
+                return target.relative_to(self._out).as_posix()
+            except Exception:  # noqa: BLE001 — try viewport, then give up gracefully
+                continue
+        return None
 
     # -- network harvest --------------------------------------------------
 
@@ -340,23 +370,57 @@ class CaptureController:
         already-harvested record list (the caller controls the since-index so a
         traced step gets only its own delta)."""
         page = self._page
-        meta = await page.evaluate(cap.META_JS)
-        snapshot = await page.evaluate(cap.SNAPSHOT_JS)
-        assets_raw = await page.evaluate(cap.ASSETS_JS)
-        tech_raw = await page.evaluate(cap.TECH_JS)
-        dom_outline = await page.evaluate(cap.DOM_OUTLINE_JS)
-        content = await page.evaluate(cap.CONTENT_JS)
-        storage = await self.capture_storage()
+        errors: List[str] = []
+
+        async def ev(js: str, default: Any, label: str, budget_ms: Optional[int] = None) -> Any:
+            """Run one page-side collector under a hard cap. On overrun/error, record
+            the field name and fall back to ``default`` so the capture still completes."""
+            try:
+                return await asyncio.wait_for(
+                    page.evaluate(js), (budget_ms or self._eval_budget_ms) / 1000
+                )
+            except Exception as exc:  # noqa: BLE001 — degrade this field, don't hang the run
+                errors.append(f"{label} ({type(exc).__name__})")
+                return default
+
+        meta = await ev(cap.META_JS, {}, "meta")
+        snapshot = await ev(
+            cap.SNAPSHOT_JS,
+            {"interactive": [], "forms": [], "fields": [], "links": []},
+            "snapshot",
+        )
+        assets_raw = await ev(
+            cap.ASSETS_JS,
+            {"stylesheets": [], "scripts": [], "images": [], "fonts": [], "media": [], "inline_styles": []},
+            "assets",
+        )
+        tech_raw = await ev(cap.TECH_JS, {}, "tech")
+        dom_outline = await ev(cap.DOM_OUTLINE_JS, "", "dom_outline")
+        content = await ev(cap.CONTENT_JS, "", "content")
+        tokens_raw = await ev(cap.DESIGN_TOKENS_JS, None, "design_tokens")
+
+        try:
+            storage = await asyncio.wait_for(
+                self.capture_storage(), self._eval_budget_ms / 1000
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"storage ({type(exc).__name__})")
+            storage = StorageSnapshot()
 
         html_ref, html_bytes = None, 0
         if save_html:
-            html = await page.content()
-            html_bytes = len(html.encode("utf-8", "ignore"))
-            html_ref = self._write_text("pages", f"{name}.html", html)
+            try:
+                html = await asyncio.wait_for(page.content(), self._eval_budget_ms / 1000)
+                html_bytes = len(html.encode("utf-8", "ignore"))
+                html_ref = self._write_text("pages", f"{name}.html", html)
+            except Exception as exc:  # noqa: BLE001 — huge/never-settling DOM
+                errors.append(f"html ({type(exc).__name__})")
 
         shot_ref = None
         if screenshot:
             shot_ref = await self.screenshot("screenshots", f"{name}.png")
+            if shot_ref is None:
+                errors.append("screenshot (timeout)")
 
         interactive = [
             InteractiveElement(
@@ -427,11 +491,13 @@ class CaptureController:
             scripts=scripts,
             assets=assets,
             inline_styles=inline_styles,
+            design_tokens=_design_tokens(tokens_raw),
             storage=storage,
             console=list(self._console),
             network=network,
             tech=tech,
             screenshot_ref=shot_ref,
+            capture_error="; ".join(errors) if errors else None,
         )
 
     def set_entry_url(self, url: str) -> None:
@@ -476,6 +542,26 @@ class CaptureController:
                 )
             except Exception:  # noqa: BLE001 — a failed download is non-fatal
                 continue
+
+
+def _design_tokens(raw: Optional[dict]) -> Optional[DesignTokens]:
+    """Build :class:`DesignTokens` from the design-token collector's dict (or None)."""
+    if not raw:
+        return None
+    return DesignTokens(
+        css_variables=raw.get("css_variables", {}) or {},
+        palette_text=raw.get("palette_text", []) or [],
+        palette_bg=raw.get("palette_bg", []) or [],
+        palette_border=raw.get("palette_border", []) or [],
+        fonts=raw.get("fonts", []) or [],
+        font_sizes=raw.get("font_sizes", []) or [],
+        radii=raw.get("radii", []) or [],
+        spacing=raw.get("spacing", []) or [],
+        shadows=raw.get("shadows", []) or [],
+        breakpoints=raw.get("breakpoints", []) or [],
+        color_scheme=raw.get("color_scheme"),
+        samples=raw.get("samples", {}) or {},
+    )
 
 
 def _field(x: dict) -> FormField:

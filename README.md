@@ -29,7 +29,7 @@ Run from `skills/web-replicate/` after `pip install -r requirements.txt && pytho
 
 | Command | Purpose |
 |---|---|
-| `capture` | One page → reconstruction-grade `PageCapture` (markup, assets, storage, network). |
+| `capture` | One page → reconstruction-grade `PageCapture` (markup, assets, storage, network, **design tokens** — CSS variables, color palette, fonts, spacing, radii, shadows, breakpoints). |
 | `trace` | Drive an ordered user path in one persistent (optionally authenticated) context; per-step network deltas are the backend evidence. |
 | `verify-auth` | The one **active** check — probe already-observed endpoints with/without the session to turn the *inferred* auth column into a *verified* one (read-only by default). |
 | `blueprint` | Render `blueprint.md` / `blueprint.json` / `backend.json` from an assembled results object. |

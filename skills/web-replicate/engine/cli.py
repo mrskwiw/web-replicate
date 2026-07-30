@@ -244,7 +244,10 @@ def trace(
                     if step.get("settle_ms"):
                         await controller.settle(int(step["settle_ms"]))
                 except Exception as exc:  # noqa: BLE001 — record & keep tracing the path
-                    error = str(exc)
+                    # ``optional`` steps (a cookie banner that may not be present) never
+                    # fail the recording — with the short action timeout they cost ~6s at
+                    # most and are simply skipped when the element is absent.
+                    error = None if step.get("optional") else str(exc)
                 network = await controller.harvest_network(since=net_mark)
                 cap_name = f"{i + 1:02d}-{slug(label)}"
                 page_capture = await controller.capture_page(

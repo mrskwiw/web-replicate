@@ -238,6 +238,30 @@ class LinkInfo(Serializable):
 
 
 @dataclass
+class DesignTokens(Serializable):
+    """The design system extracted from computed styles + accessible CSS — what a
+    rebuild needs to reproduce the *look*, not just the structure. ``css_variables``
+    are the app's own `:root` custom properties (its design-token source when it has
+    one); the palettes/fonts/radii/spacing are the most-used *rendered* values across
+    a sample of elements (so it works even for utility-CSS apps that expose no
+    variables); ``samples`` are computed styles of representative elements (body, h1,
+    primary button, link) a rebuild can match directly."""
+
+    css_variables: Dict[str, str] = field(default_factory=dict)
+    palette_text: List[str] = field(default_factory=list)
+    palette_bg: List[str] = field(default_factory=list)
+    palette_border: List[str] = field(default_factory=list)
+    fonts: List[str] = field(default_factory=list)
+    font_sizes: List[str] = field(default_factory=list)
+    radii: List[str] = field(default_factory=list)
+    spacing: List[str] = field(default_factory=list)
+    shadows: List[str] = field(default_factory=list)
+    breakpoints: List[str] = field(default_factory=list)
+    color_scheme: Optional[str] = None  # 'light' | 'dark' | 'light dark' (from color-scheme / media)
+    samples: Dict[str, Dict[str, str]] = field(default_factory=dict)
+
+
+@dataclass
 class TechFingerprint(Serializable):
     """Best-effort stack detection from client-observable signals only.
 
@@ -295,11 +319,17 @@ class PageCapture(Serializable):
     scripts: List[AssetRef] = field(default_factory=list)
     assets: List[AssetRef] = field(default_factory=list)
     inline_styles: List[str] = field(default_factory=list)
+    design_tokens: Optional[DesignTokens] = None
     storage: StorageSnapshot = field(default_factory=StorageSnapshot)
     console: List[ConsoleMessage] = field(default_factory=list)
     network: List[NetworkRecord] = field(default_factory=list)
     tech: TechFingerprint = field(default_factory=TechFingerprint)
     screenshot_ref: Optional[str] = None
+    # Set when the capture had to bail on a sub-step (a page that never settles —
+    # SSE/websocket saturation, infinite scroll). The capture is still emitted with
+    # whatever was gathered; this records what was skipped so nothing looks complete
+    # when it isn't.
+    capture_error: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

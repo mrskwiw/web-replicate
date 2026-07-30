@@ -433,6 +433,105 @@ TECH_JS = r"""
 """
 
 
+# --- Design system ---------------------------------------------------------
+
+# Extract the app's design system: its own `:root` CSS custom properties (its
+# token source when it has one) PLUS the most-used *rendered* values across a
+# bounded element sample (palette, fonts, sizes, radii, spacing, shadows) — so it
+# works even for utility-CSS apps (Tailwind) that expose no variables — PLUS
+# computed-style samples of representative elements a rebuild can match directly.
+# Reads only accessible (same-origin) stylesheets + computed styles; cross-origin
+# `cssRules` access throws and is skipped. Passive: no fetch.
+DESIGN_TOKENS_JS = r"""
+() => {
+  const clip = (s) => (s == null ? '' : String(s)).trim().slice(0, 80);
+  const top = (m, n) => Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, n).map((e) => e[0]);
+  const bump = (m, k) => { if (k) m[k] = (m[k] || 0) + 1; };
+
+  // 1. :root custom properties + @media breakpoints, from ACCESSIBLE stylesheets.
+  const vars = {};
+  const bps = new Set();
+  const walkRules = (rules) => {
+    for (const r of rules) {
+      try {
+        if (r.style && r.selectorText && /(^|,)\s*:root\b/.test(r.selectorText)) {
+          for (let i = 0; i < r.style.length; i++) {
+            const p = r.style[i];
+            if (p && p.slice(0, 2) === '--') vars[p] = clip(r.style.getPropertyValue(p));
+          }
+        }
+        if (r.conditionText || (r.media && r.media.mediaText)) {
+          const ct = r.conditionText || r.media.mediaText;
+          const m = ct.match(/(min|max)-width:\s*[\d.]+(px|em|rem)/g);
+          if (m) m.forEach((x) => bps.add(x.replace(/\s+/g, ' ')));
+        }
+        if (r.cssRules) walkRules(r.cssRules);
+      } catch (e) {}
+    }
+  };
+  for (const sheet of Array.prototype.slice.call(document.styleSheets)) {
+    let rules; try { rules = sheet.cssRules; } catch (e) { continue; }
+    if (rules) walkRules(rules);
+  }
+
+  // 2. Tally rendered values across a bounded, visible element sample.
+  const colorT = {}, bgT = {}, borderT = {}, fontT = {}, sizeT = {}, radT = {}, spaceT = {}, shadowT = {};
+  const nodes = document.querySelectorAll('body *');
+  const N = Math.min(nodes.length, 700);
+  for (let i = 0; i < N; i++) {
+    const el = nodes[i];
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    const s = getComputedStyle(el);
+    bump(colorT, s.color);
+    const bg = s.backgroundColor;
+    if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') bump(bgT, bg);
+    if (parseFloat(s.borderTopWidth) > 0) bump(borderT, s.borderTopColor);
+    bump(fontT, clip(s.fontFamily));
+    bump(sizeT, s.fontSize);
+    if (s.borderTopLeftRadius && s.borderTopLeftRadius !== '0px') bump(radT, s.borderTopLeftRadius);
+    if (s.paddingTop && s.paddingTop !== '0px') bump(spaceT, s.paddingTop);
+    if (s.gap && s.gap !== 'normal' && s.gap !== '0px') bump(spaceT, s.gap.split(' ')[0]);
+    if (s.boxShadow && s.boxShadow !== 'none') bump(shadowT, clip(s.boxShadow));
+  }
+
+  // 3. Computed-style samples of representative elements.
+  const pick = (sel, props) => {
+    const el = document.querySelector(sel); if (!el) return null;
+    const s = getComputedStyle(el); const o = {};
+    props.forEach((p) => { const v = s.getPropertyValue(p); if (v) o[p] = clip(v); });
+    return Object.keys(o).length ? o : null;
+  };
+  const samples = {};
+  const add = (k, v) => { if (v) samples[k] = v; };
+  add('body', pick('body', ['color', 'background-color', 'font-family', 'font-size', 'line-height']));
+  add('h1', pick('h1', ['font-size', 'font-weight', 'line-height', 'color']));
+  add('h2', pick('h2', ['font-size', 'font-weight']));
+  add('button', pick('button, [role=button], a.btn', ['color', 'background-color', 'border-radius', 'padding', 'font-size', 'font-weight', 'border']));
+  add('link', pick('a[href]', ['color', 'text-decoration-line', 'font-weight']));
+  add('input', pick('input, textarea, select', ['border', 'border-radius', 'padding', 'background-color', 'font-size']));
+
+  const rootCS = getComputedStyle(document.documentElement);
+  const color_scheme = clip(rootCS.getPropertyValue('color-scheme')) || null;
+
+  return {
+    css_variables: vars,
+    palette_text: top(colorT, 8),
+    palette_bg: top(bgT, 8),
+    palette_border: top(borderT, 6),
+    fonts: top(fontT, 4),
+    font_sizes: top(sizeT, 10),
+    radii: top(radT, 6),
+    spacing: top(spaceT, 10),
+    shadows: top(shadowT, 5),
+    breakpoints: Array.from(bps).slice(0, 12),
+    color_scheme: color_scheme,
+    samples: samples,
+  };
+}
+"""
+
+
 # ---------------------------------------------------------------------------
 # Pure helpers (no browser) — content-type classification & body policy
 # ---------------------------------------------------------------------------
