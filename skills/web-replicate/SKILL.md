@@ -30,7 +30,30 @@ Run from this skill directory (`.claude/skills/web-replicate/`):
 pip install -r requirements.txt && python -m playwright install chromium
 ```
 
-All engine commands are `python -m engine.cli …` run from here. Each writes its artifacts into a **capture directory** you name (`--out-dir`) and echoes a lean JSON manifest to stdout; large blobs (rendered HTML, response bodies, screenshots) are written to files and referenced by relative path, so what you read stays small while nothing is lost.
+All engine commands are `python -m engine.cli …` run from here. Each writes its artifacts into a **capture directory** you name (`--out-dir`) and echoes a lean JSON manifest to stdout; large blobs (rendered HTML, response bodies, screenshots) are written to files and referenced by relative path, so what you read stays small while nothing is lost. Every subcommand is an **independent one-shot process** (one Chromium, no shared state except an optional read-only `--session` file) writing to its **own** `--out-dir`, so many can run **concurrently in separate subagents** without colliding.
+
+## Orchestration — parallelize across paths (default)
+
+The workflow below traces **one** user path. A real app has many independent paths — and because each `trace`/`capture` writes to its own `--out-dir` and only *reads* the shared session, they parallelize cleanly. **Do not trace paths one after another. Fan them out across subagents and run them concurrently.** Coverage is the deliverable (step 0), and fan-out is how you cover breadth without serializing every journey.
+
+**Serial spine (you, the main agent — do these once, in order, around the fan-out):**
+
+1. **Map the surface & enumerate the user paths** (§0) — the full path list is the partition you fan out over.
+2. **Establish the auth session ONCE** (§2) → `.wr/session.json`, before fan-out. Never parallelize logins (concurrent fresh sessions burn auth rate limits and trip bot challenges); every subagent **replays this one session read-only** via `--session`, never `--save-session`.
+3. **Fan out** (below).
+4. **Merge, verify, render** — union the per-path observations into one backend model, run `verify-auth` once (§4b), render the single blueprint (§5).
+
+**Fan out — one subagent per path (and per distinct static capture):**
+
+- Spawn subagents with the **Agent tool, all in a single message** so they run concurrently. Cap at **~4–6 live at once** (each launches its own headless Chromium); batch the rest.
+- **Each subagent brief is self-contained.** Give it: (a) an instruction to **invoke the `web-replicate` skill** first, so it inherits every rule here (passive-only capture §Scope, destructive-action safety); (b) its **assigned path + `intent`** and the steps to drive it; (c) the entry URL and the **read-only** `--session .wr/session.json` path; (d) its **own `--out-dir capture/<path>`** (distinct per subagent — the collision guard is simply separate directories); (e) the **return contract**: a **JSON fragment** — its per-path endpoint observations (`{method, path, request_shape, response_shape, auth: inferred-…}`), any data-model fragments, and its frontend inventory for the routes it saw — plus explicit instructions to **NOT render the blueprint** and to **NOT fire destructive/irreversible steps** (drive up to, not through — flag them back to you).
+
+**Boundaries that stay serial (never parallelize these):**
+
+- **Within a trace, steps stay ordered** — a single path is one subagent's serial job; fan-out is *across* paths.
+- **Session establishment** — one login, before fan-out (spine step 2).
+- **Backend merge, `verify-auth`, and the blueprint render** — deduping endpoints across subagents (same `method+path` → one entry, union of observed shapes), reconciling data models, the one active `verify-auth` pass (§4b), and rendering are a single serial pass by you (§4/§4b/§5). Subagents only *observe*; you *synthesize*.
+- **Destructive actions** — a subagent never fires them autonomously (§ Safety).
 
 ## Workflow
 
