@@ -54,6 +54,25 @@ def test_markdown_has_sections(tmp_path):
     assert "Frontend" in md and "Home" in md
 
 
+def test_design_tokens_render_in_frontend(tmp_path):
+    """A page's captured design_tokens surface as a Frontend 'Design tokens' line
+    (previously they were captured but never rendered)."""
+    results = _results()
+    results["pages"][0]["design_tokens"] = {
+        "palette_text": ["#111"],
+        "palette_bg": ["#fff"],
+        "fonts": ["Inter"],
+        "radii": ["8px"],
+        "css_variables": {"--brand": "#5b21b6"},
+        "color_scheme": "light",
+    }
+    out = BlueprintGenerator(output_dir=str(tmp_path / "bp")).render(results)
+    md = out["markdown"].read_text(encoding="utf-8")
+    assert "Design tokens" in md
+    assert "#111" in md and "Inter" in md
+    assert "CSS variable" in md
+
+
 def test_render_tolerates_empty_results(tmp_path):
     out = BlueprintGenerator(output_dir=str(tmp_path / "bp")).render({})
     assert out["markdown"].exists()

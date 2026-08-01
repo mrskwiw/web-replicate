@@ -260,7 +260,7 @@ def trace(
                 network = await controller.harvest_network(since=net_mark)
                 cap_name = f"{i + 1:02d}-{slug(label)}"
                 page_capture = await controller.capture_page(
-                    cap_name, network, screenshot=screenshot
+                    cap_name, network, screenshot=screenshot, console_from=con_mark
                 )
                 cap_ref = (Path("steps") / f"{cap_name}.json").as_posix()
                 (Path(out_dir) / "steps" / f"{cap_name}.json").parent.mkdir(

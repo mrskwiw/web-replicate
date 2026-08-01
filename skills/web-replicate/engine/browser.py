@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from playwright.async_api import async_playwright
 
@@ -39,8 +39,6 @@ from .models import (
     StorageSnapshot,
     TechFingerprint,
 )
-
-_MAX_RECORDS = 1200  # safety cap on network records per harvest window
 
 
 class CaptureController:
@@ -100,10 +98,16 @@ class CaptureController:
 
         self._console: List[ConsoleMessage] = []
         self._page_errors: List[str] = []
-        # Raw Playwright Response objects, harvested (bodies pulled) on demand.
-        self._responses: list = []
+        # Raw Playwright Response objects, harvested (bodies pulled) on demand. A
+        # harvested handle is set to None afterward so its browser-side body buffer
+        # can be freed while the list length (and thus response_count marks) stays
+        # stable across a long trace.
+        self._responses: List[Any] = []
         self._blob_seq = 0
         self._entry_url: Optional[str] = None
+        # URLs already fetched by --download-assets, so a multi-step trace of one SPA
+        # doesn't re-download the same shared CSS/JS/font bundle every step.
+        self._downloaded: Dict[str, Optional[str]] = {}
 
     # -- lifecycle (borrowed from web-qa) ---------------------------------
 
@@ -111,7 +115,7 @@ class CaptureController:
         self._pw = await async_playwright().start()
         browser_type = getattr(self._pw, self._engine)
         self._browser = await browser_type.launch(headless=self._headless)
-        ctx_kwargs: dict = {"viewport": self._viewport}
+        ctx_kwargs: Dict[str, Any] = {"viewport": self._viewport}
         if self._user_agent:
             ctx_kwargs["user_agent"] = self._user_agent
         if self._storage_state is not None:
@@ -284,7 +288,11 @@ class CaptureController:
         responses (images/fonts/media) carry metadata only.
         """
         records: List[NetworkRecord] = []
-        for resp in self._responses[since : since + _MAX_RECORDS]:
+        end = len(self._responses)
+        for idx in range(since, end):
+            resp = self._responses[idx]
+            if resp is None:  # already harvested & freed on a prior window
+                continue
             try:
                 req = resp.request
                 req_headers = sanitize.redact_headers(
@@ -322,6 +330,10 @@ class CaptureController:
                 records.append(rec)
             except Exception:  # noqa: BLE001 — a single bad record must not sink the harvest
                 continue
+        # Free the harvested handles (their browser-side bodies are pulled now), but
+        # keep the slots so response_count()/since indices stay valid for later steps.
+        for idx in range(since, end):
+            self._responses[idx] = None
         return records
 
     async def _safe_body(self, resp) -> Optional[str]:
@@ -365,10 +377,13 @@ class CaptureController:
         *,
         screenshot: bool = False,
         save_html: bool = True,
+        console_from: int = 0,
     ) -> PageCapture:
         """Assemble a :class:`PageCapture` for the current page. ``network`` is the
         already-harvested record list (the caller controls the since-index so a
-        traced step gets only its own delta)."""
+        traced step gets only its own delta). ``console_from`` mirrors that for the
+        console: a traced step passes its start mark so each step's capture holds only
+        the console it produced, not the cumulative log (which grew O(steps²))."""
         page = self._page
         errors: List[str] = []
 
@@ -493,7 +508,7 @@ class CaptureController:
             inline_styles=inline_styles,
             design_tokens=_design_tokens(tokens_raw),
             storage=storage,
-            console=list(self._console),
+            console=list(self._console[console_from:]),
             network=network,
             tech=tech,
             screenshot_ref=shot_ref,
@@ -528,9 +543,19 @@ class CaptureController:
         )
 
     async def _download(self, assets: List[AssetRef]) -> None:
-        """Best-effort download of asset bytes to the capture dir (``--download-assets``)."""
+        """Best-effort download of asset bytes to the capture dir (``--download-assets``).
+
+        Deduplicated across steps: a URL fetched once (in this or a prior step's
+        capture) is reused, not re-fetched — a multi-step SPA trace shares one CSS/JS
+        bundle instead of re-downloading it per step. A fetch failure is recorded on
+        the asset (``download_error``) so a missing ``local_ref`` is explicit, not a
+        silent under-count.
+        """
         for a in assets:
             if not a.url.startswith(("http://", "https://")):
+                continue
+            if a.url in self._downloaded:  # already fetched (this or an earlier step)
+                a.local_ref = self._downloaded[a.url]
                 continue
             try:
                 resp = await self._context.request.get(a.url, timeout=self._timeout)
@@ -540,8 +565,10 @@ class CaptureController:
                 a.local_ref = self._write_bytes(
                     "assets", f"{a.kind.value}-{self._blob_seq:04d}-{tail}"[:120], data
                 )
-            except Exception:  # noqa: BLE001 — a failed download is non-fatal
-                continue
+                self._downloaded[a.url] = a.local_ref
+            except Exception as exc:  # noqa: BLE001 — a failed download is non-fatal
+                a.download_error = f"{type(exc).__name__}: {exc}"[:200]
+                self._downloaded[a.url] = None  # don't retry a known-bad URL next step
 
 
 def _design_tokens(raw: Optional[dict]) -> Optional[DesignTokens]:

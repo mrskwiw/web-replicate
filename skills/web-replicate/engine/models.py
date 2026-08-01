@@ -174,6 +174,10 @@ class AssetRef(Serializable):
     url: str
     attrs: Dict[str, str] = field(default_factory=dict)
     local_ref: Optional[str] = None
+    # Set when --download-assets tried and failed to fetch this asset's bytes, so a
+    # missing local_ref is an explicit failure in the manifest rather than a silent
+    # under-count.
+    download_error: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

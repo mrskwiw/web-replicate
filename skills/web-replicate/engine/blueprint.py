@@ -164,9 +164,38 @@ class BlueprintGenerator:
             keys = list((store.get("local") or {}).keys())
             if keys:
                 out.append(f"- **localStorage keys:** {', '.join(keys[:12])}")
+            self._design_tokens_lines(out, p.get("design_tokens"))
             if p.get("screenshot_ref"):
                 out.append(f"\n![{p.get('title', 'page')}]({p['screenshot_ref']})")
             out.append("")
+
+    def _design_tokens_lines(self, out: List[str], tokens: Any) -> None:
+        """Render the captured design system (palette / fonts / radii / CSS vars) — the
+        raw material a faithful visual rebuild reproduces. Only emits what was found."""
+        if not tokens:
+            return
+        palette = (
+            (tokens.get("palette_text") or [])
+            + (tokens.get("palette_bg") or [])
+            + (tokens.get("palette_border") or [])
+        )
+        bits = []
+        if palette:
+            uniq = list(dict.fromkeys(palette))[:12]
+            bits.append(f"colors {', '.join(uniq)}")
+        if tokens.get("fonts"):
+            bits.append(f"fonts {', '.join(tokens['fonts'][:4])}")
+        if tokens.get("font_sizes"):
+            bits.append(f"{len(tokens['font_sizes'])} font-size(s)")
+        if tokens.get("radii"):
+            bits.append(f"radii {', '.join(str(x) for x in tokens['radii'][:6])}")
+        nvars = len(tokens.get("css_variables") or {})
+        if nvars:
+            bits.append(f"{nvars} CSS variable(s)")
+        if tokens.get("color_scheme"):
+            bits.append(f"scheme {tokens['color_scheme']}")
+        if bits:
+            out.append(f"- **Design tokens:** {'; '.join(bits)}")
 
     def _artifacts_section(self, out: List[str], r: Dict[str, Any]) -> None:
         out.append("## Captured artifacts\n")
