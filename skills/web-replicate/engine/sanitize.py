@@ -15,7 +15,7 @@ tokens). Treat any capture as sensitive regardless.
 from __future__ import annotations
 
 import re
-from typing import Dict, Optional
+from typing import Dict, Optional, overload
 
 REDACTED = "«redacted»"
 
@@ -75,11 +75,17 @@ def redact_headers(
     return out
 
 
+@overload
+def redact_body(text: str, *, enabled: bool = True) -> str: ...
+@overload
+def redact_body(text: None, *, enabled: bool = True) -> None: ...
 def redact_body(text: Optional[str], *, enabled: bool = True) -> Optional[str]:
     """Return a text body with common secret patterns redacted.
 
     Best-effort over JSON credential keys plus bearer/JWT-looking tokens. Leaves
     structure intact so the agent can still read the request/response *shape*.
+    Redaction preserves non-``None`` input (the overloads encode ``str -> str``),
+    so callers holding a known-present body keep a ``str`` type.
     """
     if text is None or not enabled:
         return text

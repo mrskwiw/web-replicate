@@ -92,9 +92,12 @@ Runs an ordered step list in **one persistent browser context** (state carries a
 - `label` (names the step), `intent` (what it accomplishes — carried into the path doc).
 - `await_response` (`{method?, path_contains, timeout_ms?}`) — block until that response lands before capturing, for slow async actions (an LLM run, a report build).
 - `settle_ms` — extra idle wait for SPA transitions/XHR to land.
+- `optional: true` — a step that may legitimately not apply (a cookie banner that isn't shown); if its action fails it is skipped, not treated as a path failure.
 - Secrets are referenced by env var: `{"env":"PASSWORD"}` or `${TOKEN}` — **never inline credentials** in the steps file.
 
-The recording (`path.json`) lists each step's action, `url_before`/`url_after`, `http` delta, `console` delta, and a `capture_ref` to that step's full page capture under `steps/`.
+**Halt-on-fail (default).** If a **non-optional** step's action throws (selector never appears, navigation fails), the trace **stops at that step** — later steps would capture an unmet-precondition state (a "phantom" after-state for work whose precondition never happened), which is exactly the misleading evidence a replication blueprint must not contain. The failed step is still recorded (with its `error`), and `path.json` carries a top-level `halted_at` (`{index, label, reason}`); a completed path has `halted_at: null`. Pass `--continue-on-fail` to override and keep tracing (same policy as web-qa's `flow`). This mirrors web-qa's validate-each-step discipline: don't build later captures on top of a step that didn't happen.
+
+The recording (`path.json`) lists each step's action, `url_before`/`url_after`, `http` delta, `console` delta, and a `capture_ref` to that step's full page capture under `steps/`, plus `halted_at` when the path stopped early.
 
 **Persistent auth — log in ONCE, then reuse it (inherited from web-qa).** Re-logging-in for every trace burns auth rate limits and trips bot challenges. Run the login path once and save the session; replay it on every later `capture`/`trace`:
 

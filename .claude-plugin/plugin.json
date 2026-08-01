@@ -1,6 +1,6 @@
 {
   "name": "web-replicate",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Reconstruction-grade documentation of a web app so it can be REBUILT: drives every user journey in a headless browser, captures markup/assets/traffic, infers the backend contract (endpoints, request/response shapes, auth, data models), verifies the auth column, and writes a rebuild blueprint. Sibling of web-qa.",
   "author": {
     "name": "mrskwiw",

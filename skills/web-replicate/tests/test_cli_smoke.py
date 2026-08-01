@@ -84,3 +84,52 @@ def test_trace_records_path(tmp_path):
     cap = json.loads((out_dir / "steps" / "01-load-data.json").read_text(encoding="utf-8"))
     assert "loaded" in cap["content"] or "ok" in cap["content"]
     assert (out_dir / "path.json").exists()
+
+
+def test_trace_halts_on_non_optional_step_failure(tmp_path):
+    """A non-optional step that fails must halt the trace so later steps never
+    capture an unmet-precondition state (mirrors web-qa flow halt-on-fail)."""
+    out_dir = tmp_path / "trace"
+    steps = [
+        # Step 1 targets a selector that does not exist -> perform() throws.
+        {"type": "click", "selector": "#does-not-exist", "label": "missing"},
+        # Step 2 would succeed, but must never run because step 1 halted the path.
+        {"type": "click", "selector": "#load", "label": "load data", "settle_ms": 300},
+    ]
+    steps_file = tmp_path / "steps.json"
+    steps_file.write_text(json.dumps(steps), encoding="utf-8")
+
+    res = _invoke([
+        "trace", "--url", FIXTURE.as_uri(), "--steps", str(steps_file),
+        "--out-dir", str(out_dir), "--name", "halt-flow",
+    ])
+    rec = json.loads(res.output)
+
+    # Only the failing step is recorded; the healthy step 2 never ran.
+    assert len(rec["steps"]) == 1
+    assert rec["steps"][0]["error"]
+    assert rec["halted_at"] is not None
+    assert rec["halted_at"]["index"] == 1
+    # Step 2's after-capture must not exist on disk (no phantom state recorded).
+    assert not (out_dir / "steps" / "02-load-data.json").exists()
+
+
+def test_trace_continue_on_fail_runs_later_steps(tmp_path):
+    """--continue-on-fail overrides the halt: later steps still run (opt-in)."""
+    out_dir = tmp_path / "trace"
+    steps = [
+        {"type": "click", "selector": "#does-not-exist", "label": "missing"},
+        {"type": "click", "selector": "#load", "label": "load data", "settle_ms": 300},
+    ]
+    steps_file = tmp_path / "steps.json"
+    steps_file.write_text(json.dumps(steps), encoding="utf-8")
+
+    res = _invoke([
+        "trace", "--url", FIXTURE.as_uri(), "--steps", str(steps_file),
+        "--out-dir", str(out_dir), "--name", "cont-flow", "--continue-on-fail",
+    ])
+    rec = json.loads(res.output)
+
+    assert len(rec["steps"]) == 2
+    assert rec["halted_at"] is None
+    assert (out_dir / "steps" / "02-load-data.json").exists()

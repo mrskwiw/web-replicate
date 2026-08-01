@@ -43,7 +43,7 @@ class Serializable:
     """Mixin giving dataclasses an enum-safe ``to_dict``."""
 
     def to_dict(self) -> Dict[str, Any]:
-        return _clean(asdict(self))  # type: ignore[arg-type]
+        return _clean(asdict(self))  # type: ignore[arg-type,call-overload]
 
 
 # ---------------------------------------------------------------------------
@@ -370,3 +370,7 @@ class PathRecording(Serializable):
     steps: List[PathStep] = field(default_factory=list)
     storage_end: StorageSnapshot = field(default_factory=StorageSnapshot)
     tech: TechFingerprint = field(default_factory=TechFingerprint)
+    # Set when a non-optional step failed and halted the trace (halt-on-fail is the
+    # default, mirroring web-qa's ``flow``): later steps never run on an unmet
+    # precondition. ``None`` means the whole path completed.
+    halted_at: Optional[Dict[str, Any]] = None

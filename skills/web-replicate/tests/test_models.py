@@ -42,3 +42,41 @@ def test_page_capture_recurses_nested():
     assert d["network"][0]["method"] == "GET"
     assert d["storage"]["local"] == {"k": "v"}
     assert d["storage"]["cookies"][0]["name"] == "sid"
+
+
+def test_page_capture_schema_is_frozen():
+    """Seam guard: the top-level key set of PageCapture (the engine<->agent capture
+    contract that the blueprint is rebuilt from) is frozen, so a field add/rename/
+    remove is caught. web-replicate has no formal spec doc; this test IS the
+    contract check. Change deliberately? Update this set (and the blueprint) too."""
+    cap = PageCapture(
+        url="u", final_url="u", title="t", status=200, ready_state="complete"
+    )
+    assert set(cap.to_dict().keys()) == {
+        "url",
+        "final_url",
+        "title",
+        "status",
+        "ready_state",
+        "lang",
+        "meta",
+        "html_ref",
+        "html_bytes",
+        "dom_outline",
+        "content",
+        "interactive",
+        "forms",
+        "fields",
+        "links",
+        "stylesheets",
+        "scripts",
+        "assets",
+        "inline_styles",
+        "design_tokens",
+        "storage",
+        "console",
+        "network",
+        "tech",
+        "screenshot_ref",
+        "capture_error",
+    }

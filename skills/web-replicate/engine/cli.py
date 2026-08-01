@@ -178,6 +178,13 @@ def capture(
     help="Capture directory for this path (per-step captures land in steps/).",
 )
 @click.option("--name", default=None, help="Human name for this path (defaults to the steps filename).")
+@click.option(
+    "--continue-on-fail",
+    is_flag=True,
+    default=False,
+    help="Keep tracing later steps after a non-optional step fails (default: halt at "
+    "the failed step, so later captures never record an unmet-precondition state).",
+)
 @_common_options
 @click.option(
     "--save-session",
@@ -194,6 +201,7 @@ def trace(
     steps_path: str,
     out_dir: str,
     name: str | None,
+    continue_on_fail: bool,
     engine: str,
     headless: bool,
     session: str | None,
@@ -221,6 +229,7 @@ def trace(
         recorded: list[PathStep] = []
         storage_end = None
         tech = None
+        halted_at = None
         try:
             controller.set_entry_url(url)
             await controller.navigate(url)
@@ -275,6 +284,12 @@ def trace(
                     )
                 )
                 tech = page_capture.tech
+                # Halt-on-fail (default): a non-optional step that threw leaves the
+                # path in an unmet-precondition state, so later captures would record
+                # a phantom state. Stop here unless the caller opted into continuing.
+                if error is not None and not continue_on_fail:
+                    halted_at = {"index": i + 1, "label": label, "reason": error}
+                    break
             storage_end = await controller.capture_storage()
             if save_session:
                 try:
@@ -292,6 +307,7 @@ def trace(
             steps=recorded,
             storage_end=storage_end or StorageSnapshot(),
             tech=tech or TechFingerprint(),
+            halted_at=halted_at,
         )
 
     recording = asyncio.run(run())

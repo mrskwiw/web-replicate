@@ -19,6 +19,7 @@ carry the logic and are unit-tested; the async ``probe_endpoints`` does the HTTP
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -159,16 +160,22 @@ async def probe_endpoints(
     subs: Dict[str, str],
     include_mutating: bool = False,
     timeout_ms: int = 15000,
+    max_concurrency: int = 8,
 ) -> Dict[str, Any]:
     """Probe each selected endpoint with and without the session; return a report.
 
     Uses two Playwright API request contexts (one seeded from the session, one
     anonymous). No browser page is opened — this is an HTTP-level check.
+
+    Endpoints are probed **concurrently** under a ``max_concurrency`` semaphore
+    (each is independent), mirroring web-qa's thread-pooled ``security.sweep`` — the
+    previous fully-sequential loop serialized ``2·N`` awaits at up to ``timeout_ms``
+    each. Result order still follows the input inventory (``gather`` preserves it),
+    so the report stays deterministic.
     """
     from playwright.async_api import async_playwright
 
     to_probe, skipped = select_endpoints(endpoints, subs, include_mutating)
-    results: List[Dict[str, Any]] = []
 
     async with async_playwright() as p:
         ctx_kwargs: Dict[str, Any] = {"base_url": base_url}
@@ -176,32 +183,39 @@ async def probe_endpoints(
             ctx_kwargs["user_agent"] = user_agent
         authed = await p.request.new_context(storage_state=storage_state, **ctx_kwargs)
         anon = await p.request.new_context(**ctx_kwargs)
-        try:
-            for e in to_probe:
-                method = e["method"]
-                path = e["resolved_path"]
+        sem = asyncio.Semaphore(max_concurrency)
 
-                async def _status(rc: Any) -> Optional[int]:
-                    try:
-                        resp = await rc.fetch(path, method=method, timeout=timeout_ms)
-                        return resp.status
-                    except Exception:  # noqa: BLE001 — a probe failure is data, not fatal
-                        return None
+        async def _probe_one(e: Dict[str, Any]) -> Dict[str, Any]:
+            method = e["method"]
+            path = e["resolved_path"]
 
+            async def _status(rc: Any) -> Optional[int]:
+                try:
+                    resp = await rc.fetch(path, method=method, timeout=timeout_ms)
+                    return resp.status
+                except Exception:  # noqa: BLE001 — a probe failure is data, not fatal
+                    return None
+
+            async with sem:
                 with_status = await _status(authed)
                 without_status = await _status(anon)
-                verdict = classify(with_status, without_status)
-                matches, note = reconcile(e.get("auth_required"), verdict)
-                results.append({
-                    "method": method,
-                    "path": e.get("path"),
-                    "auth_inferred": e.get("auth_required"),
-                    "with_auth_status": with_status,
-                    "without_auth_status": without_status,
-                    "verdict": verdict,
-                    "matches_inference": matches,
-                    "note": note,
-                })
+            verdict = classify(with_status, without_status)
+            matches, note = reconcile(e.get("auth_required"), verdict)
+            return {
+                "method": method,
+                "path": e.get("path"),
+                "auth_inferred": e.get("auth_required"),
+                "with_auth_status": with_status,
+                "without_auth_status": without_status,
+                "verdict": verdict,
+                "matches_inference": matches,
+                "note": note,
+            }
+
+        try:
+            results: List[Dict[str, Any]] = list(
+                await asyncio.gather(*(_probe_one(e) for e in to_probe))
+            )
         finally:
             await authed.dispose()
             await anon.dispose()
