@@ -18,7 +18,13 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from playwright.async_api import async_playwright
+from playwright.async_api import (
+    Browser,
+    BrowserContext,
+    Page,
+    Playwright,
+    async_playwright,
+)
 
 from . import capture as cap
 from . import sanitize
@@ -91,10 +97,10 @@ class CaptureController:
         self._max_inline_body = max_inline_body
         self._download_assets = download_assets
 
-        self._pw = None
-        self._browser = None
-        self._context = None
-        self._page = None
+        self._pw: Optional[Playwright] = None
+        self._browser: Optional[Browser] = None
+        self._context: Optional[BrowserContext] = None
+        self._page: Optional[Page] = None
 
         self._console: List[ConsoleMessage] = []
         self._page_errors: List[str] = []
@@ -109,6 +115,24 @@ class CaptureController:
         # doesn't re-download the same shared CSS/JS/font bundle every step.
         self._downloaded: Dict[str, Optional[str]] = {}
 
+
+    # Playwright handles are None until launch(). These accessors assert the
+    # launched invariant in one place, so the call sites below can use a
+    # non-Optional handle instead of each re-proving it. Using the controller
+    # before launch() is a programming error and now says so, instead of
+    # surfacing as an AttributeError on None several frames deeper.
+    @property
+    def page(self) -> Page:
+        if self._page is None:
+            raise RuntimeError("Controller is not launched - call launch() first.")
+        return self._page
+
+    @property
+    def context(self) -> BrowserContext:
+        if self._context is None:
+            raise RuntimeError("Controller is not launched - call launch() first.")
+        return self._context
+
     # -- lifecycle (borrowed from web-qa) ---------------------------------
 
     async def launch(self) -> None:
@@ -121,15 +145,15 @@ class CaptureController:
         if self._storage_state is not None:
             ctx_kwargs["storage_state"] = self._storage_state
         self._context = await self._browser.new_context(**ctx_kwargs)
-        self._page = await self._context.new_page()
-        self._page.set_default_timeout(self._action_timeout_ms)
+        self._page = await self.context.new_page()
+        self.page.set_default_timeout(self._action_timeout_ms)
         self._wire_listeners()
 
     async def save_session(self, path: str, user_agent: Optional[str] = None) -> str:
         """Persist the live context's auth session (cookies + localStorage) plus
         user-agent to a session bundle, for replay via ``--session``. Same format
         and rationale as web-qa (tokens are UA+IP-fingerprint-bound)."""
-        state = await self._context.storage_state()
+        state = await self.context.storage_state()
         bundle = {"user_agent": user_agent or self._user_agent, "storage_state": state}
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -145,9 +169,9 @@ class CaptureController:
             await self._pw.stop()
 
     def _wire_listeners(self) -> None:
-        self._page.on("console", self._on_console)
-        self._page.on("pageerror", lambda exc: self._page_errors.append(str(exc)))
-        self._page.on("response", lambda resp: self._responses.append(resp))
+        self.page.on("console", self._on_console)
+        self.page.on("pageerror", lambda exc: self._page_errors.append(str(exc)))
+        self.page.on("response", lambda resp: self._responses.append(resp))
 
     def _on_console(self, msg) -> None:
         loc = None
@@ -162,9 +186,9 @@ class CaptureController:
     # -- navigation & actions (borrowed from web-qa) ----------------------
 
     async def navigate(self, url: str) -> None:
-        await self._page.goto(url, wait_until="domcontentloaded", timeout=self._timeout)
+        await self.page.goto(url, wait_until="domcontentloaded", timeout=self._timeout)
         try:
-            await self._page.wait_for_load_state("networkidle", timeout=self._nav_idle_ms)
+            await self.page.wait_for_load_state("networkidle", timeout=self._nav_idle_ms)
         except Exception:  # noqa: BLE001  # nosec B110 — persistent connections: proceed
             pass
 
@@ -174,31 +198,31 @@ class CaptureController:
         if t is ActionType.NAVIGATE:
             await self.navigate(_require(action.url, "url"))
         elif t is ActionType.CLICK:
-            await self._page.click(_require(action.selector, "selector"))
+            await self.page.click(_require(action.selector, "selector"))
         elif t is ActionType.FILL:
-            await self._page.fill(_require(action.selector, "selector"), action.value or "")
+            await self.page.fill(_require(action.selector, "selector"), action.value or "")
         elif t is ActionType.TYPE:
-            await self._page.type(_require(action.selector, "selector"), action.text or "")
+            await self.page.type(_require(action.selector, "selector"), action.text or "")
         elif t is ActionType.PRESS:
-            await self._page.press(action.selector or "body", _require(action.key, "key"))
+            await self.page.press(action.selector or "body", _require(action.key, "key"))
         elif t is ActionType.SCROLL:
             distance = int(action.value) if action.value else 500
-            await self._page.mouse.wheel(0, distance)
+            await self.page.mouse.wheel(0, distance)
         elif t is ActionType.WAIT_FOR:
-            await self._page.wait_for_selector(_require(action.selector, "selector"))
+            await self.page.wait_for_selector(_require(action.selector, "selector"))
         elif t is ActionType.SELECT:
             sel = _require(action.selector, "selector")
             option = action.value if action.value is not None else (action.text or "")
             try:
-                await self._page.select_option(sel, label=option)
+                await self.page.select_option(sel, label=option)
             except Exception:  # noqa: BLE001  # nosec B110 — retry by value
-                await self._page.select_option(sel, value=option)
+                await self.page.select_option(sel, value=option)
         else:  # pragma: no cover — enum is exhaustive
             raise ValueError(f"Unsupported action type: {t}")
-        await self._page.wait_for_timeout(300)
+        await self.page.wait_for_timeout(300)
 
     async def settle(self, ms: int) -> None:
-        await self._page.wait_for_timeout(ms)
+        await self.page.wait_for_timeout(ms)
 
     async def wait_for_api(
         self,
@@ -224,7 +248,7 @@ class CaptureController:
                     continue
             if waited >= timeout_ms:
                 return False
-            await self._page.wait_for_timeout(poll_ms)
+            await self.page.wait_for_timeout(poll_ms)
             waited += poll_ms
 
     def response_count(self) -> int:
@@ -241,7 +265,7 @@ class CaptureController:
 
     @property
     def page_url(self) -> str:
-        return self._page.url
+        return self.page.url
 
     # -- blob writing -----------------------------------------------------
 
@@ -268,7 +292,7 @@ class CaptureController:
         for full_page in (True, False):
             try:
                 await asyncio.wait_for(
-                    self._page.screenshot(
+                    self.page.screenshot(
                         path=str(target), full_page=full_page,
                         animations="disabled", timeout=self._shot_timeout_ms,
                     ),
@@ -345,8 +369,8 @@ class CaptureController:
     # -- storage & cookies ------------------------------------------------
 
     async def capture_storage(self) -> StorageSnapshot:
-        raw = await self._page.evaluate(cap.STORAGE_JS)
-        cookies = await self._context.cookies()
+        raw = await self.page.evaluate(cap.STORAGE_JS)
+        cookies = await self.context.cookies()
         cookie_models = [
             Cookie(
                 name=c.get("name", ""),
@@ -384,7 +408,7 @@ class CaptureController:
         traced step gets only its own delta). ``console_from`` mirrors that for the
         console: a traced step passes its start mark so each step's capture holds only
         the console it produced, not the cumulative log (which grew O(steps²))."""
-        page = self._page
+        page = self.page
         errors: List[str] = []
 
         async def ev(js: str, default: Any, label: str, budget_ms: Optional[int] = None) -> Any:
@@ -558,7 +582,7 @@ class CaptureController:
                 a.local_ref = self._downloaded[a.url]
                 continue
             try:
-                resp = await self._context.request.get(a.url, timeout=self._timeout)
+                resp = await self.context.request.get(a.url, timeout=self._timeout)
                 data = await resp.body()
                 tail = a.url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1] or "asset"
                 self._blob_seq += 1
