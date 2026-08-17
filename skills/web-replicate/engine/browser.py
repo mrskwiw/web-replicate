@@ -47,6 +47,11 @@ from .models import (
 )
 
 
+# Per-document value: it changes on every navigation, so comparing it before and
+# after a capture tells us whether we read one document or two.
+_DOC_TOKEN_JS = "() => performance.timeOrigin"
+
+
 class CaptureController:
     """Drive a single page and capture it in enough detail to rebuild it."""
 
@@ -115,7 +120,6 @@ class CaptureController:
         # doesn't re-download the same shared CSS/JS/font bundle every step.
         self._downloaded: Dict[str, Optional[str]] = {}
 
-
     # Playwright handles are None until launch(). These accessors assert the
     # launched invariant in one place, so the call sites below can use a
     # non-Optional handle instead of each re-proving it. Using the controller
@@ -181,15 +185,21 @@ class CaptureController:
                 loc = f"{location['url']}:{location.get('lineNumber', 0)}:{location.get('columnNumber', 0)}"
         except Exception:  # noqa: BLE001  # nosec B110 — a bad record must not abort
             pass
-        self._console.append(ConsoleMessage(level=msg.type, text=msg.text, location=loc))
+        self._console.append(
+            ConsoleMessage(level=msg.type, text=msg.text, location=loc)
+        )
 
     # -- navigation & actions (borrowed from web-qa) ----------------------
 
     async def navigate(self, url: str) -> None:
         await self.page.goto(url, wait_until="domcontentloaded", timeout=self._timeout)
         try:
-            await self.page.wait_for_load_state("networkidle", timeout=self._nav_idle_ms)
-        except Exception:  # noqa: BLE001  # nosec B110 — persistent connections: proceed
+            await self.page.wait_for_load_state(
+                "networkidle", timeout=self._nav_idle_ms
+            )
+        except (
+            Exception
+        ):  # noqa: BLE001  # nosec B110 — persistent connections: proceed
             pass
 
     async def perform(self, action: Action) -> None:
@@ -200,11 +210,17 @@ class CaptureController:
         elif t is ActionType.CLICK:
             await self.page.click(_require(action.selector, "selector"))
         elif t is ActionType.FILL:
-            await self.page.fill(_require(action.selector, "selector"), action.value or "")
+            await self.page.fill(
+                _require(action.selector, "selector"), action.value or ""
+            )
         elif t is ActionType.TYPE:
-            await self.page.type(_require(action.selector, "selector"), action.text or "")
+            await self.page.type(
+                _require(action.selector, "selector"), action.text or ""
+            )
         elif t is ActionType.PRESS:
-            await self.page.press(action.selector or "body", _require(action.key, "key"))
+            await self.page.press(
+                action.selector or "body", _require(action.key, "key")
+            )
         elif t is ActionType.SCROLL:
             distance = int(action.value) if action.value else 500
             await self.page.mouse.wheel(0, distance)
@@ -293,8 +309,10 @@ class CaptureController:
             try:
                 await asyncio.wait_for(
                     self.page.screenshot(
-                        path=str(target), full_page=full_page,
-                        animations="disabled", timeout=self._shot_timeout_ms,
+                        path=str(target),
+                        full_page=full_page,
+                        animations="disabled",
+                        timeout=self._shot_timeout_ms,
                     ),
                     self._shot_timeout_ms / 1000 + 2,
                 )
@@ -305,7 +323,9 @@ class CaptureController:
 
     # -- network harvest --------------------------------------------------
 
-    async def harvest_network(self, since: int = 0, body_subdir: str = "bodies") -> List[NetworkRecord]:
+    async def harvest_network(
+        self, since: int = 0, body_subdir: str = "bodies"
+    ) -> List[NetworkRecord]:
         """Turn the raw responses since index ``since`` into sanitized
         :class:`NetworkRecord`s. Text bodies below the inline cap are embedded;
         larger ones are written to ``body_subdir`` and referenced. Binary
@@ -325,8 +345,12 @@ class CaptureController:
                 resp_headers = sanitize.redact_headers(
                     await resp.all_headers(), enabled=self._redact
                 )
-                resp_ct = cap.short_content_type(cap.header_get(resp_headers, "content-type"))
-                req_ct = cap.short_content_type(cap.header_get(req_headers, "content-type"))
+                resp_ct = cap.short_content_type(
+                    cap.header_get(resp_headers, "content-type")
+                )
+                req_ct = cap.short_content_type(
+                    cap.header_get(req_headers, "content-type")
+                )
                 rec = NetworkRecord(
                     method=req.method,
                     url=resp.url,
@@ -334,7 +358,9 @@ class CaptureController:
                     status=resp.status,
                     request_headers=req_headers,
                     request_content_type=req_ct,
-                    request_body=sanitize.redact_body(req.post_data, enabled=self._redact),
+                    request_body=sanitize.redact_body(
+                        req.post_data, enabled=self._redact
+                    ),
                     response_headers=resp_headers,
                     response_content_type=resp_ct,
                 )
@@ -352,7 +378,9 @@ class CaptureController:
                                 body_subdir, f"body-{self._blob_seq:04d}.{ext}", body
                             )
                 records.append(rec)
-            except Exception:  # noqa: BLE001 — a single bad record must not sink the harvest
+            except (
+                Exception
+            ):  # noqa: BLE001 — a single bad record must not sink the harvest
                 continue
         # Free the harvested handles (their browser-side bodies are pulled now), but
         # keep the slots so response_count()/since indices stay valid for later steps.
@@ -388,11 +416,25 @@ class CaptureController:
         ]
         return StorageSnapshot(
             local=sanitize.redact_storage(raw.get("local", {}), enabled=self._redact),
-            session=sanitize.redact_storage(raw.get("session", {}), enabled=self._redact),
+            session=sanitize.redact_storage(
+                raw.get("session", {}), enabled=self._redact
+            ),
             cookies=cookie_models,
         )
 
     # -- full page capture ------------------------------------------------
+
+    async def _settle_for_capture(self, timeout_ms: int = 10000) -> None:
+        """Let an in-flight navigation reach a milestone before collecting.
+
+        Without this a capture started mid-navigation collects against a document
+        that is being torn down; every collector then degrades to its default and
+        the resulting PageCapture claims the page has no forms, links or assets.
+        """
+        try:
+            await self.page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+        except Exception:  # noqa: BLE001 — a page that never settles is not fatal
+            pass
 
     async def capture_page(
         self,
@@ -411,49 +453,83 @@ class CaptureController:
         page = self.page
         errors: List[str] = []
 
-        async def ev(js: str, default: Any, label: str, budget_ms: Optional[int] = None) -> Any:
+        async def ev(
+            js: str, default: Any, label: str, budget_ms: Optional[int] = None
+        ) -> Any:
             """Run one page-side collector under a hard cap. On overrun/error, record
-            the field name and fall back to ``default`` so the capture still completes."""
+            the field name and fall back to ``default`` so the capture still completes.
+            """
             try:
                 return await asyncio.wait_for(
                     page.evaluate(js), (budget_ms or self._eval_budget_ms) / 1000
                 )
-            except Exception as exc:  # noqa: BLE001 — degrade this field, don't hang the run
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 — degrade this field, don't hang the run
                 errors.append(f"{label} ({type(exc).__name__})")
                 return default
 
-        meta = await ev(cap.META_JS, {}, "meta")
-        snapshot = await ev(
-            cap.SNAPSHOT_JS,
-            {"interactive": [], "forms": [], "fields": [], "links": []},
-            "snapshot",
-        )
-        assets_raw = await ev(
-            cap.ASSETS_JS,
-            {"stylesheets": [], "scripts": [], "images": [], "fonts": [], "media": [], "inline_styles": []},
-            "assets",
-        )
-        tech_raw = await ev(cap.TECH_JS, {}, "tech")
-        dom_outline = await ev(cap.DOM_OUTLINE_JS, "", "dom_outline")
-        content = await ev(cap.CONTENT_JS, "", "content")
-        tokens_raw = await ev(cap.DESIGN_TOKENS_JS, None, "design_tokens")
+        # Collect under a DOCUMENT-IDENTITY check. Each ev() already degrades a
+        # single slow field to its default, which is right for a huge DOM — but it
+        # also means a navigation mid-capture silently empties every field at once,
+        # yielding a capture that looks structurally valid while describing nothing,
+        # or worse, one whose fields come from two different documents. performance
+        # .timeOrigin is per-document, so comparing it across the whole collection
+        # detects both. Retry once against the settled page before accepting.
+        for _attempt in range(2):
+            errors.clear()  # a retry supersedes the abandoned leg's field errors
+            await self._settle_for_capture()
+            doc_before = await ev(_DOC_TOKEN_JS, None, "doc_token")
 
-        try:
-            storage = await asyncio.wait_for(
-                self.capture_storage(), self._eval_budget_ms / 1000
+            meta = await ev(cap.META_JS, {}, "meta")
+            snapshot = await ev(
+                cap.SNAPSHOT_JS,
+                {"interactive": [], "forms": [], "fields": [], "links": []},
+                "snapshot",
             )
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"storage ({type(exc).__name__})")
-            storage = StorageSnapshot()
+            assets_raw = await ev(
+                cap.ASSETS_JS,
+                {
+                    "stylesheets": [],
+                    "scripts": [],
+                    "images": [],
+                    "fonts": [],
+                    "media": [],
+                    "inline_styles": [],
+                },
+                "assets",
+            )
+            tech_raw = await ev(cap.TECH_JS, {}, "tech")
+            dom_outline = await ev(cap.DOM_OUTLINE_JS, "", "dom_outline")
+            content = await ev(cap.CONTENT_JS, "", "content")
+            tokens_raw = await ev(cap.DESIGN_TOKENS_JS, None, "design_tokens")
 
-        html_ref, html_bytes = None, 0
-        if save_html:
             try:
-                html = await asyncio.wait_for(page.content(), self._eval_budget_ms / 1000)
-                html_bytes = len(html.encode("utf-8", "ignore"))
-                html_ref = self._write_text("pages", f"{name}.html", html)
-            except Exception as exc:  # noqa: BLE001 — huge/never-settling DOM
-                errors.append(f"html ({type(exc).__name__})")
+                storage = await asyncio.wait_for(
+                    self.capture_storage(), self._eval_budget_ms / 1000
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"storage ({type(exc).__name__})")
+                storage = StorageSnapshot()
+
+            html_ref, html_bytes = None, 0
+            if save_html:
+                try:
+                    html = await asyncio.wait_for(
+                        page.content(), self._eval_budget_ms / 1000
+                    )
+                    html_bytes = len(html.encode("utf-8", "ignore"))
+                    html_ref = self._write_text("pages", f"{name}.html", html)
+                except Exception as exc:  # noqa: BLE001 — huge/never-settling DOM
+                    errors.append(f"html ({type(exc).__name__})")
+
+            doc_after = await ev(_DOC_TOKEN_JS, None, "doc_token")
+            if doc_before is not None and doc_before == doc_after:
+                break
+            if _attempt == 1:
+                # Disclosed, never silent: a consumer must be able to tell a
+                # genuinely empty page from one we failed to read coherently.
+                errors.append("document changed during capture (fields may mix pages)")
 
         shot_ref = None
         if screenshot:
@@ -463,8 +539,11 @@ class CaptureController:
 
         interactive = [
             InteractiveElement(
-                selector=e["selector"], role=e["role"], text=e["text"],
-                kind=e["kind"], rank=e["rank"],
+                selector=e["selector"],
+                role=e["role"],
+                text=e["text"],
+                kind=e["kind"],
+                rank=e["rank"],
             )
             for e in snapshot["interactive"]
         ]
@@ -472,32 +551,54 @@ class CaptureController:
             FormInfo(
                 selector=f["selector"],
                 fields=[_field(x) for x in f["fields"]],
-                submit=f["submit"], action=f.get("action"), method=f.get("method"),
+                submit=f["submit"],
+                action=f.get("action"),
+                method=f.get("method"),
             )
             for f in snapshot["forms"]
         ]
         fields = [_field(x) for x in snapshot.get("fields", [])]
         links = [
             LinkInfo(
-                selector=lk["selector"], text=lk["text"], href=lk["href"],
-                scheme=lk["scheme"], external=lk["external"],
+                selector=lk["selector"],
+                text=lk["text"],
+                href=lk["href"],
+                scheme=lk["scheme"],
+                external=lk["external"],
                 new_tab=(lk["target"] == "_blank"),
             )
             for lk in snapshot["links"]
         ]
 
-        stylesheets = [AssetRef(kind=AssetKind.STYLESHEET, url=a["url"], attrs=a["attrs"]) for a in assets_raw["stylesheets"]]
-        scripts = [AssetRef(kind=AssetKind.SCRIPT, url=a["url"], attrs=a["attrs"]) for a in assets_raw["scripts"]]
-        images = [AssetRef(kind=AssetKind.IMAGE, url=a["url"], attrs=a["attrs"]) for a in assets_raw["images"]]
-        fonts = [AssetRef(kind=AssetKind.FONT, url=a["url"], attrs=a["attrs"]) for a in assets_raw["fonts"]]
-        media = [AssetRef(kind=AssetKind.MEDIA, url=a["url"], attrs=a["attrs"]) for a in assets_raw["media"]]
+        stylesheets = [
+            AssetRef(kind=AssetKind.STYLESHEET, url=a["url"], attrs=a["attrs"])
+            for a in assets_raw["stylesheets"]
+        ]
+        scripts = [
+            AssetRef(kind=AssetKind.SCRIPT, url=a["url"], attrs=a["attrs"])
+            for a in assets_raw["scripts"]
+        ]
+        images = [
+            AssetRef(kind=AssetKind.IMAGE, url=a["url"], attrs=a["attrs"])
+            for a in assets_raw["images"]
+        ]
+        fonts = [
+            AssetRef(kind=AssetKind.FONT, url=a["url"], attrs=a["attrs"])
+            for a in assets_raw["fonts"]
+        ]
+        media = [
+            AssetRef(kind=AssetKind.MEDIA, url=a["url"], attrs=a["attrs"])
+            for a in assets_raw["media"]
+        ]
         assets = images + fonts + media
 
         # Save any large inline <style> blocks as files; keep short ones inline.
         inline_styles: List[str] = []
         for i, css in enumerate(assets_raw.get("inline_styles", [])):
             if len(css) > self._max_inline_body:
-                inline_styles.append(self._write_text("styles", f"{name}-inline-{i}.css", css))
+                inline_styles.append(
+                    self._write_text("styles", f"{name}-inline-{i}.css", css)
+                )
             else:
                 inline_styles.append(css)
 
@@ -543,7 +644,9 @@ class CaptureController:
         """Record the URL the caller requested (may differ from final after redirects)."""
         self._entry_url = url
 
-    def _build_tech(self, tech_raw: dict, network: List[NetworkRecord], name: str) -> TechFingerprint:
+    def _build_tech(
+        self, tech_raw: dict, network: List[NetworkRecord], name: str
+    ) -> TechFingerprint:
         doc = next((r for r in network if r.resource_type == "document"), None)
         server = powered_by = via = None
         if doc:
