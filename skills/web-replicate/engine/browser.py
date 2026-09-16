@@ -156,9 +156,20 @@ class CaptureController:
     async def save_session(self, path: str, user_agent: Optional[str] = None) -> str:
         """Persist the live context's auth session (cookies + localStorage) plus
         user-agent to a session bundle, for replay via ``--session``. Same format
-        and rationale as web-qa (tokens are UA+IP-fingerprint-bound)."""
+        and rationale as web-qa (tokens are UA+IP-fingerprint-bound).
+
+        When no UA was pinned, record the one the browser ACTUALLY used rather than
+        ``null`` -- otherwise the replay falls through to its own default (the
+        ``HeadlessChrome`` string for a headless run), silently changing the
+        fingerprint and presenting as an expired token."""
         state = await self.context.storage_state()
-        bundle = {"user_agent": user_agent or self._user_agent, "storage_state": state}
+        ua = user_agent or self._user_agent
+        if not ua:
+            try:
+                ua = await self.page.evaluate("() => navigator.userAgent")
+            except Exception:  # noqa: BLE001 — page already gone; better null than crash
+                ua = None
+        bundle = {"user_agent": ua, "storage_state": state}
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
