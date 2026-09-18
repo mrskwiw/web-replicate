@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict
 
@@ -25,6 +26,12 @@ from .authcheck import parse_subs, probe_endpoints, resolve_base_url
 from .blueprint import BlueprintGenerator
 from .browser import CaptureController
 from .flow import build_action, slug
+from .interact import InteractError
+from .interact import click as interact_click_impl
+from .interact import fill as interact_fill_impl
+from .interact import read as interact_read_impl
+from .interact import start_session as start_interact_session
+from .interact import stop as interact_stop_impl
 from .models import BrowserEngine, PathRecording, PathStep
 
 _ENGINE_CHOICE = click.Choice([e.value for e in BrowserEngine])
@@ -185,6 +192,29 @@ def capture(
     help="Keep tracing later steps after a non-optional step fails (default: halt at "
     "the failed step, so later captures never record an unmet-precondition state).",
 )
+@click.option(
+    "--destructive/--no-destructive",
+    default=False,
+    help="Declare this step sequence destructive (a delete, a cancel, an "
+    "irreversible state change). Refuses to run (exit 4) unless --yes is also "
+    "passed -- unlike a single `capture`, a multi-step --steps script can bury "
+    "a destructive action several steps deep where a human skimming the "
+    "permission prompt's raw JSON can miss it; this forces the agent to say so.",
+)
+@click.option(
+    "--costs/--no-costs",
+    default=False,
+    help="Declare this step sequence costed -- spends real credits or money "
+    "even though it is not destructive (a paid tier upgrade, a metered API "
+    "call triggered mid-flow). Same gate as --destructive: refuses to run "
+    "(exit 4) unless --yes is also passed.",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Confirm running a --destructive and/or --costs step sequence.",
+)
 @_common_options
 @click.option(
     "--save-session",
@@ -202,6 +232,9 @@ def trace(
     out_dir: str,
     name: str | None,
     continue_on_fail: bool,
+    destructive: bool,
+    costs: bool,
+    yes: bool,
     engine: str,
     headless: bool,
     session: str | None,
@@ -214,10 +247,30 @@ def trace(
 ) -> None:
     """Record a user path: drive ordered steps in ONE persistent context, capturing
     a full page capture + network delta at each step. Secrets are referenced by env
-    var (``{"env":"VAR"}`` / ``${VAR}``), never inlined."""
+    var (``{"env":"VAR"}`` / ``${VAR}``), never inlined.
+
+    Exit codes: 0 recorded (see the payload's own ``halted_at`` for a step that
+    still failed mid-path), 4 refused (destructive or costed without --yes).
+    """
+    path_name = name or Path(steps_path).stem
+    if (destructive or costs) and not yes:
+        reasons = []
+        if destructive:
+            reasons.append("destructive")
+        if costs:
+            reasons.append("costed")
+        refused: dict[str, Any] = {
+            "name": path_name,
+            "entry_url": url,
+            "verified": False,
+            "reason": f"refused: {'/'.join(reasons)} step sequence requires --yes",
+            "steps": [],
+        }
+        _emit(refused, output)
+        sys.exit(4)
+
     raw = json.loads(Path(steps_path).read_text(encoding="utf-8"))
     steps = raw["steps"] if isinstance(raw, dict) else raw
-    path_name = name or Path(steps_path).stem
     env = os.environ
 
     async def run():
@@ -411,6 +464,121 @@ def verify_auth(
         )
     )
     _emit(report, output)
+
+
+@cli.group()
+def interact() -> None:
+    """A persistent, agent-driven browser session spanning SEPARATE CLI calls.
+
+    `trace --steps` requires a complete step sequence, guessed upfront from
+    static markup, to reach and capture a page for a rebuild. For a gated
+    multi-step flow worth documenting (a signup wizard, a multi-step
+    checkout) that guess can be wrong several steps deep with no signal about
+    which step broke. `interact`: `start` once, then `click`/`fill`/`read`
+    one real action at a time against the SAME live page across as many
+    separate invocations as it takes, `stop` when done -- so the `--steps`
+    file handed to `trace` is built from what the page actually did, not a
+    guess. No auto-chaining, no guessed values, no destructive/cost awareness
+    of its own -- every action is one explicit call the agent chooses to
+    make. See engine/interact.py.
+    """
+
+
+@interact.command("start")
+@click.option("--url", required=True, help="Page to open once the session starts.")
+@click.option(
+    "--state",
+    "state_path",
+    required=True,
+    type=click.Path(),
+    help="Where to write this session's handle -- pass the SAME path to every "
+    "later `interact` call. Refuses to overwrite an existing one (stop it first) "
+    "so a browser process is never silently leaked.",
+)
+@click.option(
+    "--session",
+    default=None,
+    type=click.Path(exists=True),
+    help="Seed cookies/localStorage from a saved auth bundle (same format as "
+    "`trace --save-session`).",
+)
+@click.option("--user-agent", default=None, help="Pin the user-agent for this session.")
+@click.option("--headless/--no-headless", default=True)
+@click.option(
+    "--timeout-s", default=10.0, type=float, help="How long to wait for chromium to start."
+)
+def interact_start(
+    url: str,
+    state_path: str,
+    session: str | None,
+    user_agent: str | None,
+    headless: bool,
+    timeout_s: float,
+) -> None:
+    """Launch a detached chromium and navigate to --url."""
+    try:
+        result = start_interact_session(
+            state_path, url, session=session, user_agent=user_agent,
+            headless=headless, timeout_s=timeout_s,
+        )
+    except InteractError as exc:
+        click.echo(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    _emit(result, None)
+
+
+@interact.command("click")
+@click.option("--state", "state_path", required=True, type=click.Path(exists=True))
+@click.option("--text", default=None, help="Click the first element containing this text.")
+@click.option(
+    "--selector", default=None, help="Click by CSS/role selector instead of --text."
+)
+def interact_click(state_path: str, text: str | None, selector: str | None) -> None:
+    """Click one control and report whether the page navigated or just changed."""
+    try:
+        result = interact_click_impl(state_path, text=text, selector=selector)
+    except InteractError as exc:
+        click.echo(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    _emit(result, None)
+
+
+@interact.command("fill")
+@click.option("--state", "state_path", required=True, type=click.Path(exists=True))
+@click.option("--selector", required=True, help="Field to fill.")
+@click.option("--value", required=True, help="Text to type.")
+def interact_fill(state_path: str, selector: str, value: str) -> None:
+    """Fill one field."""
+    try:
+        result = interact_fill_impl(state_path, selector, value)
+    except InteractError as exc:
+        click.echo(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    _emit(result, None)
+
+
+@interact.command("read")
+@click.option("--state", "state_path", required=True, type=click.Path(exists=True))
+def interact_read(state_path: str) -> None:
+    """Report the current URL/title/visible-text preview, no action taken."""
+    try:
+        result = interact_read_impl(state_path)
+    except InteractError as exc:
+        click.echo(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    _emit(result, None)
+
+
+@interact.command("stop")
+@click.option("--state", "state_path", required=True, type=click.Path(exists=True))
+def interact_stop(state_path: str) -> None:
+    """Kill the detached chromium and remove the session handle."""
+    try:
+        result = interact_stop_impl(state_path)
+    except InteractError as exc:
+        click.echo(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    _emit(result, None)
 
 
 def main() -> None:

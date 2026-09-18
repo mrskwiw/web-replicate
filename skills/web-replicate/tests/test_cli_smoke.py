@@ -133,3 +133,81 @@ def test_trace_continue_on_fail_runs_later_steps(tmp_path):
     assert len(rec["steps"]) == 2
     assert rec["halted_at"] is None
     assert (out_dir / "steps" / "02-load-data.json").exists()
+
+
+def _load_step_file(tmp_path):
+    steps = [
+        {"type": "click", "selector": "#load", "label": "load data", "settle_ms": 300}
+    ]
+    steps_file = tmp_path / "steps.json"
+    steps_file.write_text(json.dumps(steps), encoding="utf-8")
+    return steps_file
+
+
+def test_trace_refuses_a_destructive_run_without_yes(tmp_path):
+    """A --steps script can bury a destructive action several steps deep where
+    a human skimming the permission prompt's raw JSON can miss it -- this
+    forces the agent to say so explicitly before anything runs."""
+    out_dir = tmp_path / "trace"
+    steps_file = _load_step_file(tmp_path)
+
+    res = CliRunner().invoke(cli, [
+        "trace", "--url", FIXTURE.as_uri(), "--steps", str(steps_file),
+        "--out-dir", str(out_dir), "--destructive",
+    ])
+
+    assert res.exit_code == 4, res.output
+    payload = json.loads(res.output)
+    assert payload["verified"] is False
+    assert "refused" in payload["reason"]
+    assert "destructive" in payload["reason"]
+    assert payload["steps"] == []
+    assert not out_dir.exists(), "a refused trace must not create the capture dir"
+
+
+def test_trace_runs_a_destructive_run_with_yes(tmp_path):
+    out_dir = tmp_path / "trace"
+    steps_file = _load_step_file(tmp_path)
+
+    res = _invoke([
+        "trace", "--url", FIXTURE.as_uri(), "--steps", str(steps_file),
+        "--out-dir", str(out_dir), "--destructive", "--yes",
+    ])
+    rec = json.loads(res.output)
+
+    assert len(rec["steps"]) == 1
+    assert (out_dir / "path.json").exists()
+
+
+def test_trace_refuses_a_costed_run_without_yes(tmp_path):
+    """`--costs` is `--destructive`'s sibling gate: a step sequence that spends
+    real credits or money without being destructive (a paid tier upgrade
+    triggered mid-flow) was previously ungated entirely."""
+    out_dir = tmp_path / "trace"
+    steps_file = _load_step_file(tmp_path)
+
+    res = CliRunner().invoke(cli, [
+        "trace", "--url", FIXTURE.as_uri(), "--steps", str(steps_file),
+        "--out-dir", str(out_dir), "--costs",
+    ])
+
+    assert res.exit_code == 4, res.output
+    payload = json.loads(res.output)
+    assert payload["verified"] is False
+    assert "refused" in payload["reason"]
+    assert "costed" in payload["reason"]
+    assert not out_dir.exists()
+
+
+def test_trace_runs_a_costed_run_with_yes(tmp_path):
+    out_dir = tmp_path / "trace"
+    steps_file = _load_step_file(tmp_path)
+
+    res = _invoke([
+        "trace", "--url", FIXTURE.as_uri(), "--steps", str(steps_file),
+        "--out-dir", str(out_dir), "--costs", "--yes",
+    ])
+    rec = json.loads(res.output)
+
+    assert len(rec["steps"]) == 1
+    assert (out_dir / "path.json").exists()

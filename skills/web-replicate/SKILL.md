@@ -113,6 +113,24 @@ python -m engine.cli trace   --url <BASE>/projects  --session .wr/session.json -
 
 `login.json` is an ordinary steps file (fill email, fill password `{"env":"PASSWORD"}`, click submit, `await_response` the login endpoint). Verify the replay worked: an authenticated page shows logged-in chrome and its network has **no** `/api/auth/login` call.
 
+### 2a. Finding the steps for a gated flow you can't guess in one shot
+
+`trace --steps` needs the complete step sequence *before* it runs — fine for a login form, unreliable for a multi-step signup wizard or checkout flow where a wrong guess three steps in gives no signal about which step actually broke. `interact` is a persistent browser session spanning SEPARATE CLI calls, for finding that sequence empirically instead of guessing it from static markup:
+
+```bash
+python -m engine.cli interact start --url <URL> --state session.json [--session <auth-bundle>] [--headless]
+python -m engine.cli interact read  --state session.json
+python -m engine.cli interact click --state session.json --text "Continue"
+python -m engine.cli interact fill  --state session.json --selector "#field" --value "..."
+python -m engine.cli interact stop  --state session.json
+```
+
+`start` launches a real chromium that survives across every later call (each is a separate process reconnecting to it); `--state` is the handle — reuse the same path for every action against one session, and always `stop` when done or the browser leaks. `click --text "..."` matches the first element containing that visible text (how a human would refer to a control); `--selector` targets precisely when text is ambiguous. `read`'s `content_preview` and `click`'s `changed`/`navigated` are your only feedback, on purpose — this finds the real sequence, it doesn't replace `capture`/`trace`.
+
+**`changed: false` is not proof nothing happened** — some UI transitions render slower than the fixed settle window. Call `read` when it actually matters whether a click did something.
+
+**No `--yes` gate, no auto-anything, by design.** `interact` guesses nothing and blocks nothing — every click is a call you chose to make. Once the real sequence is known, write it as an ordinary `steps.json` and run it through `trace` (with `--destructive`/`--costs --yes` if it earns them, see Safety below) — `interact` finding a sequence works is not itself documentation; `trace`'s capture is.
+
 ### 3. Document the frontend (you, from the captures)
 
 Read each capture and write the frontend half of the blueprint. For every page/route:
@@ -190,6 +208,8 @@ Then give the user an in-session summary: which paths were traced, the frontend 
 ## Safety — destructive actions (mandatory)
 
 **Never fire an irreversible interaction autonomously while tracing** — payments, deletes, sending mail, account changes, or submitting a form that creates a real record. To document such a path, either drive it up to (not through) the irreversible step, or **ask the user for explicit confirmation** before including that step — the session's Claude Code permission settings are the backstop. Read-only/idempotent navigation runs freely. (Same policy as web-qa; there is no engine allowlist — the judgment is yours.)
+
+**`trace --destructive`/`--costs --yes`: say so before you run it, not just before you write it.** A `--steps` script can bury a destructive or costed action several steps deep where a human skimming the permission prompt's raw JSON can miss it. Pass `--destructive` for an irreversible step sequence (a delete, a cancel) or `--costs` for one that spends real credits/money without being destructive (a paid tier upgrade mid-flow) — `trace` refuses to run (exit 4) unless `--yes` is also passed, forcing the agent to explicitly confirm it recognized the risk rather than relying solely on the human catching it in the confirmation prompt. This is a self-declaration gate, not a bypass of the permission-prompt backstop above — both apply.
 
 ## Notes & limitations
 
