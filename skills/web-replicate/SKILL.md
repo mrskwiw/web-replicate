@@ -161,18 +161,25 @@ It drops into `--session` unmodified (same `{"user_agent": ...,
   folder — never itself covered by any project's `.gitignore` — so move it
   to the verified-ignored location before doing anything else with it.
 
-The captured `user_agent` **must be the real value from that browser**,
-never assumed — a session is bound to the UA+IP fingerprint it was issued
-under (same rule as above), and replaying it under a different UA fails
-looking exactly like an expired token, not a fingerprint mismatch.
+Capture the browser's real `user_agent`, never assume one — it costs
+nothing and some sites need it. Sessions are **commonly** (not
+universally) bound to the UA+IP fingerprint they were issued under (same
+rule as above); on a site that does enforce this, replaying under a
+different UA fails looking exactly like an expired token, not a
+fingerprint mismatch. On a site that doesn't enforce it, a replay failure
+means something else broke.
 
-**Both paths capture ONE origin — the site you're actually on.** If the
-app keeps auth state on a separate identity/app subdomain (a different
-origin from the page you exported), the bundle can be syntactically valid
-and still missing what that other origin needs, and the replay fails
-looking exactly like an expired session rather than an incomplete one.
-**Verify the replay is actually authenticated** before trusting the bundle
-for anything further — don't just confirm the file loaded without error.
+**Both paths have two real scope limits, not one.** (1) They capture ONE
+origin — the site you're actually on. If the app keeps auth state on a
+separate identity/app subdomain, the bundle can be syntactically valid and
+still missing what that other origin needs. (2) They capture cookies +
+localStorage only — the same scope `--save-session` has always used
+(Playwright's own `storage_state`), never sessionStorage, IndexedDB, or
+service-worker-cached state; a site that keeps auth in one of those
+produces a bundle that looks complete and isn't. Either gap fails looking
+exactly like an expired session rather than an incomplete one. **Verify the
+replay is actually authenticated** before trusting the bundle for anything
+further — don't just confirm the file loaded without error.
 
 ### 2a. Finding the steps for a gated flow you can't guess in one shot
 
