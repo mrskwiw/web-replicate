@@ -137,4 +137,5 @@ qa-results/
 
 # QA/driver run scratch — holds live auth sessions, never publish
 .qa/
+.wr/
 *.session.json
