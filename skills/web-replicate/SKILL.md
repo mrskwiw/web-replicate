@@ -113,6 +113,67 @@ python -m engine.cli trace   --url <BASE>/projects  --session .wr/session.json -
 
 `login.json` is an ordinary steps file (fill email, fill password `{"env":"PASSWORD"}`, click submit, `await_response` the login endpoint). Verify the replay worked: an authenticated page shows logged-in chrome and its network has **no** `/api/auth/login` call.
 
+**Alternative: borrow a session from your own everyday browser.** This
+solves a narrower problem than it might sound like: getting past a login
+flow that **cannot be scripted at all** (OAuth/SSO, MFA, passkeys) without
+driving it end-to-end here. **It does not defeat bot-detection that
+fingerprints the automation tool itself** — a replay still runs through
+this engine's own Playwright-controlled Chromium, which carries its own
+signals (`navigator.webdriver`, CDP artifacts, TLS/JA3 fingerprint)
+independent of whether the cookies are valid. A site that blocks
+*automation*, not merely unauthenticated requests, can still block a
+replay carrying a perfectly legitimate borrowed session — don't expect
+this to be a general bypass.
+
+**Treat the exported bundle as a live credential, because it is one — full
+account access, not a scoped token.** `.wr/` is this skill's own convention
+for session storage (`--save-session` already writes there), and it's
+excluded in this project's own repo — but that guarantee is about *this*
+project, not about whatever project you're running the skill against.
+**Before trusting `.wr/` in that project, verify it properly, with two
+checks:** (1) the rule is actually **committed**, not just sitting in an
+uncommitted edit that protects nobody else's checkout or CI —
+`git show HEAD:.gitignore` must contain a line covering `.wr/`; (2) the
+path isn't **already tracked** — `git ls-files .wr/` must return nothing,
+since an ignore rule never retroactively untracks a file git already knows
+about. If either check fails, add and commit an explicit rule to that
+repo's own `.gitignore` (and `git rm --cached` anything already tracked)
+before saving into it, or save outside any git working tree entirely.
+Never assume. Delete the bundle
+once you've used it either way; never let it land in a captured artifact,
+a blueprint, or anything committed or shared.
+
+It drops into `--session` unmodified (same `{"user_agent": ...,
+"storage_state": {"cookies": [...], "origins": [...]}}` shape
+`trace --save-session` already writes):
+
+- **By hand — works regardless of how you obtained this skill:** DevTools
+  → Application → Cookies + Local Storage in the browser you're already
+  logged into; assemble the same JSON shape yourself and save it to the
+  verified-ignored location from above.
+- **The extension**, if you're working in the `qa-tool` development
+  workspace this skill ships from (not part of the distributed plugin
+  itself): `browser-extension/` at that workspace's root, in-house use
+  only, loaded via developer mode. Open the target site where you're
+  already logged in, click **Export Session** — it reads that tab's
+  cookies (via the browser's own cookie API, so `HttpOnly` cookies are
+  included) and localStorage, and downloads a bundle to your Downloads
+  folder — never itself covered by any project's `.gitignore` — so move it
+  to the verified-ignored location before doing anything else with it.
+
+The captured `user_agent` **must be the real value from that browser**,
+never assumed — a session is bound to the UA+IP fingerprint it was issued
+under (same rule as above), and replaying it under a different UA fails
+looking exactly like an expired token, not a fingerprint mismatch.
+
+**Both paths capture ONE origin — the site you're actually on.** If the
+app keeps auth state on a separate identity/app subdomain (a different
+origin from the page you exported), the bundle can be syntactically valid
+and still missing what that other origin needs, and the replay fails
+looking exactly like an expired session rather than an incomplete one.
+**Verify the replay is actually authenticated** before trusting the bundle
+for anything further — don't just confirm the file loaded without error.
+
 ### 2a. Finding the steps for a gated flow you can't guess in one shot
 
 `trace --steps` needs the complete step sequence *before* it runs — fine for a login form, unreliable for a multi-step signup wizard or checkout flow where a wrong guess three steps in gives no signal about which step actually broke. `interact` is a persistent browser session spanning SEPARATE CLI calls, for finding that sequence empirically instead of guessing it from static markup:
