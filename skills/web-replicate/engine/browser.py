@@ -74,6 +74,18 @@ _LOW_MEMORY_ARGS = [
 ]
 
 
+def _low_memory_args(engine: str, low_memory: bool) -> List[str]:
+    """Chromium-only. `_LOW_MEMORY_ARGS` are Chromium command-line switches; passing
+    them to a firefox/webkit launch would choke that engine (post-commit review,
+    2026-09-22), so --low-memory is a correctly-silent no-op there. Best-effort
+    footprint optimization, not a correctness feature. (This fork carries `engine`
+    as a plain string, not web-qa/web-drive's `BrowserEngine` enum -- hence the
+    string compare.)"""
+    if low_memory and engine == "chromium":
+        return list(_LOW_MEMORY_ARGS)
+    return []
+
+
 class CaptureController:
     """Drive a single page and capture it in enough detail to rebuild it."""
 
@@ -167,8 +179,9 @@ class CaptureController:
         self._pw = await async_playwright().start()
         browser_type = getattr(self._pw, self._engine)
         launch_kwargs: Dict[str, Any] = {"headless": self._headless}
-        if self._low_memory:
-            launch_kwargs["args"] = _LOW_MEMORY_ARGS
+        args = _low_memory_args(self._engine, self._low_memory)
+        if args:
+            launch_kwargs["args"] = args
         self._browser = await browser_type.launch(**launch_kwargs)
         ctx_kwargs: Dict[str, Any] = {"viewport": self._viewport}
         if self._user_agent:
