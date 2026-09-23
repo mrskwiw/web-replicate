@@ -52,6 +52,27 @@ from .models import (
 # after a capture tells us whether we read one document or two.
 _DOC_TOKEN_JS = "() => performance.timeOrigin"
 
+# COMPLETION_AND_OPTIMIZATION_PLAN.md v2.2, X-M1 (2026-09-22): opt-in, conservative
+# Chromium flags that cut per-instance baseline RSS in headless/automation contexts.
+# Matters most for `SKILL.md`'s fan-out orchestration, where ~4-6 of these launch
+# concurrently -- every flag here is paid once per subagent. Deliberately does NOT
+# include `--single-process`: it destabilizes Playwright's own CDP connection and
+# would trade a memory saving for flaky runs, which is a worse failure mode than the
+# memory pressure this flag exists to reduce. Ported from web-qa/web-drive's
+# byte-identical `browser.py` for shared-lineage consistency even though this file
+# is an independent fork.
+_LOW_MEMORY_ARGS = [
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-default-apps",
+    "--disable-sync",
+    "--metrics-recording-only",
+    "--mute-audio",
+    "--no-first-run",
+]
+
 
 class CaptureController:
     """Drive a single page and capture it in enough detail to rebuild it."""
@@ -73,6 +94,7 @@ class CaptureController:
         action_timeout_ms: int = 6000,
         shot_timeout_ms: int = 12000,
         eval_budget_ms: int = 8000,
+        low_memory: bool = False,
     ) -> None:
         self._out = Path(out_dir)
         self._engine = engine
@@ -102,6 +124,7 @@ class CaptureController:
         self._redact = redact
         self._max_inline_body = max_inline_body
         self._download_assets = download_assets
+        self._low_memory = low_memory
 
         self._pw: Optional[Playwright] = None
         self._browser: Optional[Browser] = None
@@ -143,7 +166,10 @@ class CaptureController:
     async def launch(self) -> None:
         self._pw = await async_playwright().start()
         browser_type = getattr(self._pw, self._engine)
-        self._browser = await browser_type.launch(headless=self._headless)
+        launch_kwargs: Dict[str, Any] = {"headless": self._headless}
+        if self._low_memory:
+            launch_kwargs["args"] = _LOW_MEMORY_ARGS
+        self._browser = await browser_type.launch(**launch_kwargs)
         ctx_kwargs: Dict[str, Any] = {"viewport": self._viewport}
         if self._user_agent:
             ctx_kwargs["user_agent"] = self._user_agent

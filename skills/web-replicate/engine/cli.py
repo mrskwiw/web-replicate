@@ -63,6 +63,7 @@ def _controller(
     user_agent: str | None,
     redact: bool,
     download_assets: bool,
+    low_memory: bool = False,
 ) -> CaptureController:
     storage_state, session_ua = _load_session(session)
     return CaptureController(
@@ -73,6 +74,7 @@ def _controller(
         user_agent=user_agent or session_ua,
         redact=redact,
         download_assets=download_assets,
+        low_memory=low_memory,
     )
 
 
@@ -109,6 +111,13 @@ def _common_options(fn):
     fn = click.option(
         "--screenshot", is_flag=True, default=False, help="Also capture a full-page screenshot."
     )(fn)
+    fn = click.option(
+        "--low-memory/--no-low-memory",
+        default=False,
+        help="Launch Chromium with conservative memory-reduction flags (weaker "
+        "baseline resource use; trades nothing functional). Worth it when several "
+        "of these run concurrently (fan-out) or the host is otherwise memory-tight.",
+    )(fn)
     return fn
 
 
@@ -139,6 +148,7 @@ def capture(
     include_secrets: bool,
     download_assets: bool,
     screenshot: bool,
+    low_memory: bool,
     output: str | None,
 ) -> None:
     """Navigate to URL and capture one page in reconstruction-grade detail."""
@@ -147,6 +157,7 @@ def capture(
         controller = _controller(
             out_dir, engine, headless, session, user_agent,
             redact=not include_secrets, download_assets=download_assets,
+            low_memory=low_memory,
         )
         await controller.launch()
         try:
@@ -242,6 +253,7 @@ def trace(
     include_secrets: bool,
     download_assets: bool,
     screenshot: bool,
+    low_memory: bool,
     save_session: str | None,
     output: str | None,
 ) -> None:
@@ -277,6 +289,7 @@ def trace(
         controller = _controller(
             out_dir, engine, headless, session, user_agent,
             redact=not include_secrets, download_assets=download_assets,
+            low_memory=low_memory,
         )
         await controller.launch()
         recorded: list[PathStep] = []
@@ -507,6 +520,39 @@ def interact() -> None:
 @click.option(
     "--timeout-s", default=10.0, type=float, help="How long to wait for chromium to start."
 )
+@click.option(
+    "--low-memory/--no-low-memory",
+    default=False,
+    help="Launch Chromium with conservative memory-reduction flags. Worth it "
+    "here especially: this process is DETACHED and can outlive the agent turn "
+    "that started it if `stop` is forgotten (see `interact` --help).",
+)
+@click.option(
+    "--chrome-path",
+    default=None,
+    help="Launch this browser BINARY (real Chrome/Edge/Brave/a channel build) "
+    "instead of Playwright's bundled Chromium -- so the fingerprint is a real "
+    "browser's. For a HUMAN-driven session past a wall that flags automation "
+    "Chromium: you drive and clear the wall, this only observes. Not evasion "
+    "(no webdriver masking / synthetic input) -- it IS the real browser.",
+)
+@click.option(
+    "--real-chrome",
+    is_flag=True,
+    default=False,
+    help="Convenience for --chrome-path: auto-locate the installed Google Chrome.",
+)
+@click.option(
+    "--user-data-dir",
+    "user_data_dir",
+    default=None,
+    type=click.Path(),
+    help="Persistent profile dir (SURVIVES `stop`, unlike the default throwaway "
+    "temp profile) -- log in / clear a challenge once by hand, and every later "
+    "session reuses it. Use a DEDICATED dir, never your everyday Chrome's own "
+    "default profile (Chrome refuses remote debugging on that, and it would be "
+    "locked by any running Chrome).",
+)
 def interact_start(
     url: str,
     state_path: str,
@@ -514,12 +560,18 @@ def interact_start(
     user_agent: str | None,
     headless: bool,
     timeout_s: float,
+    low_memory: bool,
+    chrome_path: str | None,
+    real_chrome: bool,
+    user_data_dir: str | None,
 ) -> None:
-    """Launch a detached chromium and navigate to --url."""
+    """Launch a detached browser and navigate to --url."""
     try:
         result = start_interact_session(
             state_path, url, session=session, user_agent=user_agent,
-            headless=headless, timeout_s=timeout_s,
+            headless=headless, timeout_s=timeout_s, low_memory=low_memory,
+            chrome_path=chrome_path, real_chrome=real_chrome,
+            user_data_dir=user_data_dir,
         )
     except InteractError as exc:
         click.echo(json.dumps({"error": str(exc)}))
